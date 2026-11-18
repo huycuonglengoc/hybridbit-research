@@ -1,0 +1,2 @@
+# Google Colab already supplies PyTorch. psutil adds best-effort CPU sampling.
+psutil>=5.9
