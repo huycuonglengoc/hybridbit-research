@@ -33,6 +33,8 @@ class Task:
     allowed_devices: tuple[DeviceName, ...]
     seed: int
     work_units: int
+    item_count: int
+    source_start: int
 
 
 class TaskGraph:
@@ -99,6 +101,8 @@ class TaskResult:
             "dependencies": ";".join(map(str, self.task.dependencies)),
             "input_bytes": self.task.input_bytes,
             "output_bytes": self.task.output_bytes,
+            "item_count": self.task.item_count,
+            "source_start": self.task.source_start,
             "enqueue_ms": (self.enqueue_time - origin) * 1000,
             "start_ms": (self.start_time - origin) * 1000,
             "finish_ms": (self.finish_time - origin) * 1000,
@@ -117,6 +121,7 @@ class BenchmarkConfig:
     workload: Workload
     task_count: int = 24
     batch_size: int = 8192
+    total_items: int | None = None
     cpu_workers: int = 2
     cpu_threads: int = 1
     gpu_inflight: int = 2
@@ -130,10 +135,13 @@ class BenchmarkConfig:
     gpu_fallback: bool = True
     cuda_device: int = 0
     allow_tf32: bool = False
+    counter_start: int = 1
 
     def validate(self) -> None:
         if self.task_count < 1 or self.batch_size < 1:
             raise ValueError("task_count and batch_size must be positive")
+        if self.total_items is not None and self.total_items < 1:
+            raise ValueError("total_items must be positive when set")
         if self.cpu_workers < 1 or self.cpu_threads < 1 or self.gpu_inflight < 1:
             raise ValueError("worker, thread, and inflight counts must be positive")
         if not 0 <= self.static_cpu_share <= 1:
@@ -353,6 +361,7 @@ class TrialResult:
     def summary(self) -> dict[str, Any]:
         duration_s = self.finished_at - self.started_at
         latencies = [task.total_ms for task in self.tasks]
+        item_count = sum(task.task.item_count for task in self.tasks)
         per_executor: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
         for task in self.tasks:
             bucket = per_executor[task.executor]
@@ -368,6 +377,8 @@ class TrialResult:
             "duration_s": duration_s,
             "task_count": len(self.tasks),
             "throughput_tasks_per_s": len(self.tasks) / duration_s if duration_s else 0.0,
+            "item_count": item_count,
+            "items_per_second": item_count / duration_s if duration_s else 0.0,
             "latency_ms": {
                 "mean": statistics.fmean(latencies) if latencies else 0.0,
                 "median": percentile(latencies, 0.5),
@@ -402,9 +413,21 @@ class BenchmarkRunner:
 
     def make_tasks(self) -> list[Task]:
         tasks: list[Task] = []
-        shape = self.config.workload.shape_for(self.config.batch_size)
-        for index in range(self.config.task_count):
+        remaining = self.config.total_items
+        index = 0
+        emitted_items = 0
+        while remaining is None or remaining > 0:
+            if remaining is None and index >= self.config.task_count:
+                break
+            task_batch_size = self.config.batch_size if remaining is None else min(self.config.batch_size, remaining)
+            shape = self.config.workload.shape_for(task_batch_size)
             dependencies = (index - 1,) if self.config.dependency_chain and index else ()
+            is_counter_workload = self.config.workload.name == "multiword"
+            input_seed = (
+                self.config.counter_start + emitted_items
+                if is_counter_workload
+                else self.config.seed + index * 7919
+            )
             tasks.append(
                 Task(
                     task_id=index,
@@ -413,13 +436,19 @@ class BenchmarkRunner:
                     input_bytes=shape.input_bytes,
                     output_bytes=shape.output_bytes,
                     batch_id=index,
-                    batch_size=self.config.batch_size,
+                    batch_size=task_batch_size,
                     dependencies=dependencies,
                     allowed_devices=("cpu", "gpu") if self.has_gpu else ("cpu",),
-                    seed=self.config.seed + index * 7919,
+                    seed=input_seed,
                     work_units=shape.work_units,
+                    item_count=self.config.workload.items_in_batch(task_batch_size),
+                    source_start=input_seed,
                 )
             )
+            emitted_items += self.config.workload.items_in_batch(task_batch_size)
+            if remaining is not None:
+                remaining -= task_batch_size
+            index += 1
         return tasks
 
     def _calibrate(self, cpu: CPUExecutor, gpu: GPUExecutor, model: CostModel) -> None:
@@ -456,7 +485,11 @@ class BenchmarkRunner:
             value = self.config.workload.make_input(result.task.seed, result.task.batch_size)
             with torch.inference_mode():
                 expected = self.config.workload.run(value)
-            if not torch.allclose(result.output, expected, rtol=2e-4, atol=2e-5):
+            if result.output.dtype.is_floating_point:
+                matches = torch.allclose(result.output, expected, rtol=2e-4, atol=2e-5)
+            else:
+                matches = torch.equal(result.output, expected)
+            if not matches:
                 max_error = (result.output - expected).abs().max().item()
                 errors.append(f"task {result.task.task_id}: maximum absolute error {max_error:.6g}")
         return errors
@@ -507,7 +540,7 @@ class BenchmarkRunner:
             scheduled.add(task.task_id)
 
         try:
-            while len(completed) < self.config.task_count:
+            while len(completed) < len(graph.tasks):
                 made_progress = False
                 for task in graph.ready(completed, scheduled):
                     # Bound pending work: the bounds make buffer ownership and

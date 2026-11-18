@@ -35,9 +35,11 @@ def fraction(value: str) -> float:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=["all", "cpu", "gpu", "hybrid-static", "hybrid-dynamic"], default="all")
-    parser.add_argument("--workload", choices=["elementwise", "reduction", "matmul"], default="elementwise")
+    parser.add_argument("--workload", choices=["elementwise", "reduction", "matmul", "multiword"], default="elementwise")
     parser.add_argument("--tasks", type=positive_int, default=24, help="number of deterministic task batches per trial")
     parser.add_argument("--batch-size", type=positive_int, default=8192, help="rows per task for elementwise/reduction")
+    parser.add_argument("--items", type=positive_int, help="exact total numeric vectors; final batch is shortened as needed")
+    parser.add_argument("--counter-start", type=int, default=1, help="first counter for the generic multiword workload")
     parser.add_argument("--width", type=positive_int, default=1024, help="columns for elementwise/reduction")
     parser.add_argument("--matrix-dim", type=positive_int, default=1024, help="square matrix edge for matmul")
     parser.add_argument("--trials", type=positive_int, default=3)
@@ -73,6 +75,7 @@ def print_summary(summary: dict[str, object]) -> None:
     print(
         f"  {summary['mode']:<15} trial {summary['trial_index']}: "
         f"{summary['throughput_tasks_per_s']:.2f} tasks/s | "  # type: ignore[index]
+        f"{summary['items_per_second']:.2f} items/s | "  # type: ignore[index]
         f"median {latency['median']:.2f} ms | p95 {latency['p95']:.2f} ms | "  # type: ignore[index]
         f"validation {'PASS' if summary['validation_passed'] else 'FAIL'}"  # type: ignore[index]
     )
@@ -85,12 +88,15 @@ def aggregate(summaries: list[dict[str, object]]) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for mode, values in by_mode.items():
         throughputs = [float(value["throughput_tasks_per_s"]) for value in values]
+        item_rates = [float(value["items_per_second"]) for value in values]
         rows.append(
             {
                 "mode": mode,
                 "trials": len(values),
                 "throughput_tasks_per_s_median": statistics.median(throughputs),
                 "throughput_tasks_per_s_stdev": statistics.stdev(throughputs) if len(throughputs) > 1 else 0.0,
+                "items_per_second_median": statistics.median(item_rates),
+                "items_per_second_stdev": statistics.stdev(item_rates) if len(item_rates) > 1 else 0.0,
                 "all_validation_passed": all(bool(value["validation_passed"]) for value in values),
             }
         )
@@ -103,11 +109,16 @@ def main() -> int:
         raise SystemExit("--warmup must be non-negative")
     if args.cuda_device < 0:
         raise SystemExit("--cuda-device must be non-negative")
+    if args.items is not None and args.workload == "matmul":
+        raise SystemExit("--items is not supported for matmul; use --tasks instead")
+    if args.workload == "multiword" and args.counter_start < 1:
+        raise SystemExit("--counter-start must be at least 1 for multiword")
     workload = build_workload(args.workload, args.width, args.matrix_dim)
     config = BenchmarkConfig(
         workload=workload,
         task_count=args.tasks,
         batch_size=args.batch_size,
+        total_items=args.items,
         cpu_workers=args.cpu_workers,
         cpu_threads=args.cpu_threads,
         gpu_inflight=args.gpu_inflight,
@@ -121,6 +132,7 @@ def main() -> int:
         gpu_fallback=not args.no_gpu_fallback,
         cuda_device=args.cuda_device,
         allow_tf32=args.allow_tf32,
+        counter_start=args.counter_start,
     )
     runner = BenchmarkRunner(config)
     requested = [args.mode] if args.mode != "all" else ["cpu", "gpu", "hybrid-static", "hybrid-dynamic"]

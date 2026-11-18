@@ -48,6 +48,17 @@ For a dependency-chain/DAG overhead check:
 !python3 run_benchmark.py --mode hybrid-dynamic --dependency-chain --tasks 12 --batch-size 4096 --width 512
 ```
 
+For an exact one-million-item throughput test, use generic multiword integer
+arithmetic over the deterministic counter range `1..1,000,000`:
+
+```bash
+!python3 run_benchmark.py --mode all --require-cuda --workload multiword \
+  --counter-start 1 --items 1000000 --batch-size 8192 --trials 3 --warmup 1
+```
+
+The console and summary report `items_per_second`. An item here is a safe
+numeric test vector; it is not a private key and no public keys are generated.
+
 The script skips GPU modes safely if CUDA is unavailable, so the CPU baseline
 also works on a non-GPU runtime.
 
