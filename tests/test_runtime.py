@@ -8,6 +8,7 @@ try:
     TORCH_AVAILABLE = True
 except ModuleNotFoundError:
     TORCH_AVAILABLE = False
+    torch = None  # type: ignore[assignment]
 
 
 @unittest.skipUnless(TORCH_AVAILABLE, "PyTorch is required for runtime tests")
@@ -54,3 +55,27 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(sum(task.item_count for task in tasks), 1_000_000)
         self.assertEqual(tasks[0].source_start, 1)
         self.assertEqual(tasks[-1].source_start + tasks[-1].item_count - 1, 1_000_000)
+
+    def test_multiword_output_is_int64(self) -> None:
+        from hetero_pipeline.workloads import MultiwordArithmeticWorkload
+
+        workload = MultiwordArithmeticWorkload()
+        output = workload.run(workload.make_input(1, 8))
+        self.assertEqual(workload.output_dtype(), torch.int64)
+        self.assertEqual(output.dtype, torch.int64)
+
+    @unittest.skipUnless(TORCH_AVAILABLE and torch.cuda.is_available(), "CUDA is required for GPU dtype regression test")
+    def test_gpu_multiword_preserves_integer_output_dtype(self) -> None:
+        from hetero_pipeline.runtime import BenchmarkConfig, BenchmarkRunner
+        from hetero_pipeline.workloads import MultiwordArithmeticWorkload
+
+        result = BenchmarkRunner(
+            BenchmarkConfig(
+                workload=MultiwordArithmeticWorkload(),
+                total_items=64,
+                batch_size=64,
+                validate_tasks=1,
+            )
+        ).run("gpu")
+        self.assertFalse(result.validation_errors)
+        self.assertEqual(result.tasks[0].output.dtype, torch.int64)

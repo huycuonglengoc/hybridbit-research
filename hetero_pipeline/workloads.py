@@ -38,6 +38,8 @@ class Workload(Protocol):
 
     def output_shape(self, batch_size: int) -> tuple[int, ...]: ...
 
+    def output_dtype(self) -> torch.dtype: ...
+
     def items_in_batch(self, batch_size: int) -> int: ...
 
 
@@ -75,6 +77,9 @@ class ElementwiseWorkload:
     def output_shape(self, batch_size: int) -> tuple[int, ...]:
         return (batch_size, self.width)
 
+    def output_dtype(self) -> torch.dtype:
+        return torch.float32
+
     def items_in_batch(self, batch_size: int) -> int:
         return batch_size
 
@@ -102,6 +107,9 @@ class ReductionWorkload:
 
     def output_shape(self, batch_size: int) -> tuple[int, ...]:
         return (batch_size,)
+
+    def output_dtype(self) -> torch.dtype:
+        return torch.float32
 
     def items_in_batch(self, batch_size: int) -> int:
         return batch_size
@@ -137,6 +145,9 @@ class MatmulWorkload:
     def output_shape(self, batch_size: int) -> tuple[int, ...]:
         del batch_size
         return (self.matrix_dim, self.matrix_dim)
+
+    def output_dtype(self) -> torch.dtype:
+        return torch.float32
 
     def items_in_batch(self, batch_size: int) -> int:
         del batch_size
@@ -182,6 +193,9 @@ class MultiwordArithmeticWorkload:
 
     def output_shape(self, batch_size: int) -> tuple[int, ...]:
         return (batch_size, 4)
+
+    def output_dtype(self) -> torch.dtype:
+        return torch.int64
 
     def items_in_batch(self, batch_size: int) -> int:
         return batch_size

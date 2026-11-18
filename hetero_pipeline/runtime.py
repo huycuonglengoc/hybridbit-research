@@ -264,17 +264,17 @@ class GPUExecutor:
         self.device = torch.device(f"cuda:{cuda_device}")
         torch.cuda.set_device(self.device)
         self.stream = torch.cuda.Stream(device=self.device)
-        self._output_pool: dict[tuple[int, ...], list[torch.Tensor]] = defaultdict(list)
+        self._output_pool: dict[tuple[tuple[int, ...], torch.dtype], list[torch.Tensor]] = defaultdict(list)
 
-    def _acquire_output_buffer(self, shape: tuple[int, ...]) -> torch.Tensor:
+    def _acquire_output_buffer(self, shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
         """Reuse completed pinned output buffers instead of growing per task."""
-        available = self._output_pool[shape]
+        available = self._output_pool[(shape, dtype)]
         if available:
             return available.pop()
-        return torch.empty(shape, dtype=torch.float32, device="cpu", pin_memory=self.pin_memory)
+        return torch.empty(shape, dtype=dtype, device="cpu", pin_memory=self.pin_memory)
 
     def _release_output_buffer(self, output: torch.Tensor) -> None:
-        self._output_pool[tuple(output.shape)].append(output)
+        self._output_pool[(tuple(output.shape), output.dtype)].append(output)
 
     def submit(self, task: Task, keep_output: bool, predicted_ms: float) -> GPUTicket:
         enqueued = time.perf_counter()
@@ -283,7 +283,9 @@ class GPUExecutor:
         if self.pin_memory:
             value = tree_pin_memory(value)
         prepared = time.perf_counter()
-        output_host = self._acquire_output_buffer(self.workload.output_shape(task.batch_size))
+        output_host = self._acquire_output_buffer(
+            self.workload.output_shape(task.batch_size), self.workload.output_dtype()
+        )
         h2d_start, h2d_end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
         compute_start, compute_end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
         d2h_start, d2h_end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
